@@ -6,15 +6,13 @@ import pandas as pd
 from datetime import datetime
 from rich import print as rprint
 from rich.table import Table
-from nltk.tokenize import wordpunct_tokenize
 
 # 自定義模組
 from label_utils import classify_tokens, load_emotion_dict
-from text_preprocessing import advanced_clean,clean_tokens
+from text_preprocessing import clean_tokens
 
 # === 載入字典 ===
 emotion_dict = load_emotion_dict("NRC_Emotion_Label.csv")
-
 
 def format_date(date_str):
     try:
@@ -28,23 +26,27 @@ def format_date(date_str):
     except:
         return datetime.now().strftime('%Y/%m/%d')
 
-
 def analyze_emotions(text, section, date):
     sentences = [s.strip() for s in text.split('.') if s.strip()]
     rows = []
     label_map = {-1: "Negative", 0: "Neutral", 1: "Positive"}
 
     for sent in sentences:
-        clean = clean_tokens(sent)
-        tokens = wordpunct_tokenize(clean)
-        label = classify_tokens(tokens, emotion_dict)
+        tokens = clean_tokens(sent)
+
+        # 空句處理
+        if not tokens:
+            label = 0  # 預設為 Neutral
+        else:
+            label = classify_tokens(tokens, emotion_dict)
+
         label_str = label_map.get(label, "Unknown")
 
         table = Table(title="單句情緒預測結果", show_lines=True)
         table.add_column("Text", style="cyan")
         table.add_column("Predicted Emotion", style="green")
-        rprint(table)
         table.add_row(sent, label_str)
+        rprint(table)
 
         rows.append({
             'date': date,
@@ -54,7 +56,6 @@ def analyze_emotions(text, section, date):
             'confidence': 1.0
         })
     return pd.DataFrame(rows)
-
 
 def analyze_diary(diary):
     date = format_date(diary.get('date', ''))
@@ -66,7 +67,6 @@ def analyze_diary(diary):
             section_df = analyze_emotions(text, section, date)
             all_df = pd.concat([all_df, section_df], ignore_index=True)
     return all_df
-
 
 def analyze_all():
     path = "./diary_json"
@@ -92,7 +92,6 @@ def analyze_all():
             rprint(f"- {emo}: {count} ({count/len(all_results)*100:.1f}%)")
     else:
         rprint("[red bold]無分析結果。[/red bold]")
-
 
 if __name__ == '__main__':
     analyze_all()
