@@ -5,7 +5,8 @@ import torch
 import pandas as pd
 import numpy as np
 from collections import Counter
-from typing import List
+from typing import List, Optional, Union
+from functools import lru_cache
 from nltk.tokenize import wordpunct_tokenize
 from nltk.corpus import wordnet
 
@@ -39,17 +40,18 @@ def normalize_token(word: str) -> str:
     return contractions.get(word.lower().strip(), word.lower().strip())
 
 # === 判斷 token 是否為有效詞彙（WordNet） ===
+@lru_cache(maxsize=50000)
 def is_valid_token(token: str) -> bool:
     return token.isalpha() and wordnet.synsets(token)
 
 # === 清洗並過濾句子（回傳 None 表示該句被丟棄）===
-def clean_and_filter_tokens(text: str) -> list[str] | None:
+def clean_and_filter_tokens(text: str) -> Optional[List[str]]:
     tokens = clean_tokens(text)
     valid_tokens = [t for t in tokens if is_valid_token(t)]
     return valid_tokens if len(valid_tokens) >= 5 else None
 
 # === 主分類函數（詞組極性） ===
-def classify_tokens(tokens: List[str], emotion_dict: dict) -> int | None:
+def classify_tokens(tokens: List[str], emotion_dict: dict, return_counts=False) -> Union[int, dict, None]:
     labels = []
     negation_count = 0
     intensify_weight = 1.0
@@ -108,32 +110,39 @@ def classify_tokens(tokens: List[str], emotion_dict: dict) -> int | None:
             label = emotion_dict[word]['label']
             if negation_count % 2 == 1:
                 label = -label
-            label = int(round(label * intensify_weight))
+            label = int(np.clip(round(label * intensify_weight), -1, 1))
             labels.append(label)
             negation_count = 0
             intensify_weight = 1.0
 
         i += 1
 
-    return Counter(labels).most_common(1)[0][0] if labels else None
+    if not labels:
+        return None if not return_counts else {}
+
+    counts = Counter(labels)
+    return counts.most_common(1)[0][0] if not return_counts else dict(counts)
 
 # === 單字轉 multi-hot 向量 ===
 def build_emotion_feature(word: str, emotion_dict: dict, emotion2idx: dict) -> np.ndarray:
     tags = []
+    word = word.lower()
 
-    # 單字情緒標籤
-    if word.lower() in emotion_dict:
-        tags += emotion_dict[word.lower()].get("tags", [])
+    if word in emotion_dict:
+        tags += emotion_dict[word].get("tags", [])
 
-    # 如果是短語（bi/tri-phrase），也檢查 phrase_emotion_dict
-    if word.lower() in phrase_emotion_dict:
-        tags += phrase_emotion_dict[word.lower()].get("tags", [])
-        tags += phrase_emotion_dict[word.lower()].get("emotion_tags", [])
+    if word in phrase_emotion_dict:
+        tags += phrase_emotion_dict[word].get("tags", [])
+        tags += phrase_emotion_dict[word].get("emotion_tags", [])
 
     vec = np.zeros(len(emotion2idx), dtype=int)
     for tag in tags:
         if tag in emotion2idx:
             vec[emotion2idx[tag]] = 1
+
+    if vec.sum() == 0 and 'neutral' in emotion2idx:
+        vec[emotion2idx['neutral']] = 1
+
     return vec
 
 # === 整個 token 序列的向量化表示 ===
