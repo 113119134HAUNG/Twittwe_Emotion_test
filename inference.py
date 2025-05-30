@@ -3,7 +3,7 @@
 import torch
 import pickle
 from tensorflow.keras.preprocessing.sequence import pad_sequences
-from text_preprocessing import advanced_clean,clean_tokens
+from text_preprocessing import clean_tokens
 from label_utils import load_emotion_dict, extract_emotion_index, build_sequence_emotion_features
 from model import SentimentClassifier
 
@@ -36,17 +36,18 @@ model.eval()
 # === 單句推論函數 ===
 def predict_class(text: str):
     tokens = clean_tokens(text)
+    if not tokens:
+        return "Unclassified", 0.0
+
     text_seq = tokenizer.texts_to_sequences([' '.join(tokens)])
     padded_seq = pad_sequences(text_seq, maxlen=MAX_LEN, padding='post')
-    input_ids = torch.tensor(padded_seq).to(DEVICE)
+    input_ids = torch.tensor(padded_seq, dtype=torch.long, device=DEVICE)
 
     emotion_tensor = build_sequence_emotion_features(tokens, emotion_dict, emotion2idx)
     if emotion_tensor.shape[0] < MAX_LEN:
         pad_len = MAX_LEN - emotion_tensor.shape[0]
-        emotion_tensor = torch.cat([
-            emotion_tensor,
-            torch.zeros(pad_len, emotion_tensor.shape[1])
-        ])
+        pad_tensor = torch.zeros((pad_len, emotion_tensor.shape[1]), device=DEVICE)
+        emotion_tensor = torch.cat([emotion_tensor, pad_tensor], dim=0)
     else:
         emotion_tensor = emotion_tensor[:MAX_LEN]
     emotion_tensor = emotion_tensor.unsqueeze(0).to(DEVICE)
@@ -60,18 +61,21 @@ def predict_class(text: str):
 # === 多句推論函數 ===
 def predict_batch(text_list):
     results = []
-
     for text in text_list:
         tokens = clean_tokens(text)
+        if not tokens:
+            results.append((text, "Unclassified", 0.0))
+            continue
+
         token_str = ' '.join(tokens)
         input_ids = tokenizer.texts_to_sequences([token_str])
         input_ids = pad_sequences(input_ids, maxlen=MAX_LEN, padding='post')
-        input_tensor = torch.tensor(input_ids).long().to(DEVICE)
+        input_tensor = torch.tensor(input_ids, dtype=torch.long, device=DEVICE)
 
         emotion_tensor = build_sequence_emotion_features(tokens, emotion_dict, emotion2idx)
         if emotion_tensor.shape[0] < MAX_LEN:
-            pad = torch.zeros((MAX_LEN - emotion_tensor.shape[0], emotion_dim))
-            emotion_tensor = torch.cat([emotion_tensor, pad], dim=0)
+            pad_tensor = torch.zeros((MAX_LEN - emotion_tensor.shape[0], emotion_dim), device=DEVICE)
+            emotion_tensor = torch.cat([emotion_tensor, pad_tensor], dim=0)
         else:
             emotion_tensor = emotion_tensor[:MAX_LEN]
         emotion_tensor = emotion_tensor.unsqueeze(0).to(DEVICE)
@@ -86,7 +90,7 @@ def predict_batch(text_list):
 
     return results
 
-# === CLI 測試（選用）===
+# === CLI 測試 ===
 if __name__ == "__main__":
     while True:
         text = input("Enter sentence (or 'exit'): ").strip()
