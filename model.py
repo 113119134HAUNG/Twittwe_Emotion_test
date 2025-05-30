@@ -7,17 +7,15 @@ class MultiHeadAttention(nn.Module):
     def __init__(self, embed_dim, num_heads):
         super().__init__()
         self.attn = nn.MultiheadAttention(embed_dim=embed_dim, num_heads=num_heads, batch_first=True)
+        self.norm = nn.LayerNorm(embed_dim)
 
     def forward(self, x):
         attn_output, _ = self.attn(x, x, x)
-        return attn_output
+        return self.norm(x + attn_output)
 
 class SentimentClassifier(nn.Module):
     def __init__(self, vocab_size=10000, embedding_dim=128, hidden_dim=128, num_heads=4,
                  num_classes=3, emotion_dim=None):
-        """
-        emotion_dim: 必須設定為情緒 multi-hot 特徵的實際維度
-        """
         super().__init__()
         assert emotion_dim is not None, "請傳入正確的 emotion_dim（例如 len(emotion2idx)）"
         self.emotion_dim = emotion_dim
@@ -37,11 +35,12 @@ class SentimentClassifier(nn.Module):
         self.attention = MultiHeadAttention(embed_dim=hidden_dim * 2, num_heads=num_heads)
 
         self.classifier = nn.Sequential(
+            nn.Dropout(0.3),
             nn.Linear(hidden_dim * 4, 256),
-            nn.GELU(),
+            nn.SiLU(),
             nn.Dropout(0.3),
             nn.Linear(256, 128),
-            nn.GELU(),
+            nn.SiLU(),
             nn.Dropout(0.3),
             nn.Linear(128, num_classes)
         )
@@ -57,13 +56,11 @@ class SentimentClassifier(nn.Module):
                 nn.init.zeros_(param)
 
     def forward(self, x, emotion_feat=None):
-        """
-        x: [B, L]
-        emotion_feat: [B, L, E] → optional 情緒 multi-hot 特徵
-        """
         x_embed = self.embedding(x)  # [B, L, D]
 
         if self.emotion_dim > 0 and emotion_feat is not None:
+            assert emotion_feat.shape[-1] == self.emotion_dim, \
+                f"emotion_feat 維度錯誤，應為 {self.emotion_dim}，但得到 {emotion_feat.shape[-1]}"
             x_embed = torch.cat([x_embed, emotion_feat], dim=-1)  # → [B, L, D+E]
 
         x_embed = self.embedding_dropout(x_embed)
@@ -71,6 +68,7 @@ class SentimentClassifier(nn.Module):
         lstm_out = self.lstm_norm(lstm_out)
 
         attn_out = self.attention(lstm_out)
+
         mean_pooled = attn_out.mean(dim=1)
         max_pooled = attn_out.max(dim=1).values
         pooled = torch.cat([mean_pooled, max_pooled], dim=1)
