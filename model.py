@@ -3,6 +3,7 @@
 import torch
 import torch.nn as nn
 
+
 class MultiHeadAttention(nn.Module):
     def __init__(self, embed_dim, num_heads):
         super().__init__()
@@ -13,36 +14,68 @@ class MultiHeadAttention(nn.Module):
         attn_output, _ = self.attn(x, x, x)
         return self.norm(x + attn_output)
 
-class SentimentClassifier(nn.Module):
-    def __init__(self, vocab_size=10000, embedding_dim=128, hidden_dim=128, num_heads=4,
-                 num_classes=3, emotion_dim=None):
-        super().__init__()
-        assert emotion_dim is not None, "請傳入正確的 emotion_dim（例如 len(emotion2idx)）"
-        self.emotion_dim = emotion_dim
-        input_dim = embedding_dim + emotion_dim
 
+class ResidualClassifier(nn.Module):
+    def __init__(self, input_dim, hidden_dim, num_classes, dropout=0.3):
+        super().__init__()
+        self.fc1 = nn.Linear(input_dim, hidden_dim)
+        self.norm1 = nn.LayerNorm(hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
+        self.norm2 = nn.LayerNorm(hidden_dim)
+        self.out = nn.Linear(hidden_dim, num_classes)
+        self.dropout = nn.Dropout(dropout)
+        self.activation = nn.SiLU()
+
+    def forward(self, x):
+        x = self.fc1(x)
+        x = self.activation(self.norm1(x))
+        x = self.dropout(x)
+
+        residual = x
+        x = self.fc2(x)
+        x = self.activation(self.norm2(x + residual))
+        x = self.dropout(x)
+
+        return self.out(x)
+
+
+class SentimentClassifier(nn.Module):
+    def __init__(self, vocab_size=10000, embedding_dim=128, hidden_dim=128,
+                 num_heads=4, num_classes=3, emotion_dim=None):
+        super().__init__()
+        assert emotion_dim is not None,
+        self.emotion_dim = emotion_dim
+        self.embedding_dim = embedding_dim
+        self.input_dim = embedding_dim + emotion_dim
+
+        # === Embedding ===
         self.embedding = nn.Embedding(vocab_size, embedding_dim, padding_idx=0)
         self.embedding_dropout = nn.Dropout(0.3)
 
+        # === Emotion Gating Layer ===
+        self.emotion_gate = nn.Sequential(
+            nn.Linear(emotion_dim, 1),
+            nn.Sigmoid()  # Gate: [B, L, 1]
+        )
+
+        # === LSTM Encoder ===
         self.lstm = nn.LSTM(
-            input_size=input_dim,
+            input_size=self.input_dim,
             hidden_size=hidden_dim,
             batch_first=True,
             bidirectional=True
         )
         self.lstm_norm = nn.LayerNorm(hidden_dim * 2)
 
+        # === Attention Layer ===
         self.attention = MultiHeadAttention(embed_dim=hidden_dim * 2, num_heads=num_heads)
 
-        self.classifier = nn.Sequential(
-            nn.Dropout(0.3),
-            nn.Linear(hidden_dim * 4, 256),
-            nn.SiLU(),
-            nn.Dropout(0.3),
-            nn.Linear(256, 128),
-            nn.SiLU(),
-            nn.Dropout(0.3),
-            nn.Linear(128, num_classes)
+        # === Residual Classifier ===
+        self.classifier = ResidualClassifier(
+            input_dim=hidden_dim * 4,
+            hidden_dim=128,
+            num_classes=num_classes,
+            dropout=0.3
         )
 
         self.dropout = nn.Dropout(0.3)
@@ -59,11 +92,15 @@ class SentimentClassifier(nn.Module):
         x_embed = self.embedding(x)  # [B, L, D]
 
         if self.emotion_dim > 0 and emotion_feat is not None:
-            assert emotion_feat.shape[-1] == self.emotion_dim, \
-                f"emotion_feat 維度錯誤，應為 {self.emotion_dim}，但得到 {emotion_feat.shape[-1]}"
-            x_embed = torch.cat([x_embed, emotion_feat], dim=-1)  # → [B, L, D+E]
+            # === Emotion Gating ===
+            gate = self.emotion_gate(emotion_feat)  # [B, L, 1]
+            gated_embed = x_embed * gate  # 加權輸入
+            x_embed = torch.cat([gated_embed, emotion_feat], dim=-1)  # → [B, L, D+E]
+        else:
+            x_embed = torch.cat([x_embed, emotion_feat], dim=-1)
 
         x_embed = self.embedding_dropout(x_embed)
+
         lstm_out, _ = self.lstm(x_embed)
         lstm_out = self.lstm_norm(lstm_out)
 
