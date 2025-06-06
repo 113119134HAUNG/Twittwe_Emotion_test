@@ -4,7 +4,13 @@ import torch
 import pickle
 from tensorflow.keras.preprocessing.sequence import pad_sequences
 from text_preprocessing import clean_tokens
-from label_utils import load_emotion_dict, extract_emotion_index, build_sequence_emotion_features
+from label_utils import (
+    load_emotion_dict,
+    extract_emotion_index,
+    build_sequence_emotion_features,
+    load_neutral_dict,
+    classify_with_two_dicts
+)
 from model import SentimentClassifier
 
 # === 基本參數 ===
@@ -21,6 +27,9 @@ emotion_dict = load_emotion_dict("/content/Social_IOT-NLP情緒分析/NRC_Emotio
 emotion2idx = extract_emotion_index(emotion_dict)
 emotion_dim = len(emotion2idx)
 
+# === 載入中性字典（僅用於推論） ===
+neutral_dict = load_neutral_dict("/content/Social_IOT-NLP情緒分析/NRC_Emotion_Label2.csv")
+
 # === 載入模型 ===
 model = SentimentClassifier(
     vocab_size=10000,
@@ -30,10 +39,11 @@ model = SentimentClassifier(
     num_classes=3,
     emotion_dim=emotion_dim
 ).to(DEVICE)
+
 model.load_state_dict(torch.load("/content/Social_IOT-NLP情緒分析/best_model.pth", map_location=DEVICE))
 model.eval()
 
-# === 單句推論函數 ===
+# === 模型推論：單句 ===
 def predict_class(text: str):
     tokens = clean_tokens(text)
     if not tokens:
@@ -58,7 +68,15 @@ def predict_class(text: str):
         pred_idx = prob.argmax(dim=1).item()
         return SENTIMENT_CLASSES[pred_idx], float(prob[0][pred_idx])
 
-# === 多句推論函數 ===
+# === 字典分類（非模型） ===
+def predict_with_dict(text: str):
+    tokens = clean_tokens(text)
+    if not tokens:
+        return "Unclassified"
+    label_code = classify_with_two_dicts(tokens, emotion_dict, neutral_dict)
+    return {1: "Positive", -1: "Negative", 0: "Neutral"}.get(label_code, "Unclassified")
+
+# === 批次推論 ===
 def predict_batch(text_list):
     results = []
     for text in text_list:
@@ -92,9 +110,14 @@ def predict_batch(text_list):
 
 # === CLI 測試 ===
 if __name__ == "__main__":
+    print("輸入句子（輸入 'exit' 離開）")
     while True:
-        text = input("Enter sentence (or 'exit'): ").strip()
+        text = input("\nEnter sentence: ").strip()
         if text.lower() == 'exit':
             break
-        label, confidence = predict_class(text)
-        print(f"→ 預測類別：{label} (信心：{confidence:.2%})")
+
+        model_label, model_conf = predict_class(text)
+        dict_label = predict_with_dict(text)
+
+        print(f"模型預測：{model_label} (信心：{model_conf:.2%})")
+        print(f"字典推論：{dict_label}")
