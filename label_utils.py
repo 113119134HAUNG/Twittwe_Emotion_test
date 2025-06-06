@@ -17,7 +17,7 @@ from negation_words import negation_words
 from intensifier_words import intensifier_words
 from text_preprocessing import advanced_clean, clean_tokens
 
-# === 載入已處理好的情緒詞典 ===
+# === 載入已處理好的情緒詞典（正負） ===
 def load_emotion_dict(path: str = "NRC_Emotion_Label.csv") -> dict:
     df = pd.read_csv(path)
     df.columns = df.columns.str.strip()
@@ -29,6 +29,20 @@ def load_emotion_dict(path: str = "NRC_Emotion_Label.csv") -> dict:
         tags = [t.strip() for t in str(row['emotion']).split(',') if t.strip()]
         emotion_dict[word] = {"label": label, "tags": tags}
     return emotion_dict
+
+# === 載入中性詞典 ===
+def load_neutral_dict(path: str = "NRC_Emotion_Label2.csv") -> set:
+    df = pd.read_csv(path)
+    df.columns = df.columns.str.strip()
+    df = df.dropna(subset=['word', 'emotion', 'association'])
+
+    # 篩選為中性詞的條件
+    neutral_words = df[
+        (df['association'].astype(int) == 0) |
+        (df['emotion'].str.contains('neutral', case=False, na=False))
+    ]['word'].str.strip().str.lower()
+
+    return set(neutral_words)
 
 # === 建立 emotion → index 對照表 ===
 def extract_emotion_index(emotion_dict: dict) -> dict:
@@ -50,7 +64,7 @@ def clean_and_filter_tokens(text: str) -> Optional[List[str]]:
     valid_tokens = [t for t in tokens if is_valid_token(t)]
     return valid_tokens if len(valid_tokens) >= 5 else None
 
-# === 主分類函數（詞組極性） ===
+# === 原始主分類函數（詞組極性） ===
 def classify_tokens(tokens: List[str], emotion_dict: dict, return_counts=False) -> Union[int, dict, None]:
     labels = []
     negation_count = 0
@@ -122,6 +136,41 @@ def classify_tokens(tokens: List[str], emotion_dict: dict, return_counts=False) 
 
     counts = Counter(labels)
     return counts.most_common(1)[0][0] if not return_counts else dict(counts)
+
+# === 新增：結合中性字典與正負字典分類 ===
+def classify_with_two_dicts(tokens: List[str], emotion_dict: dict, neutral_dict: set) -> Optional[int]:
+    """
+    三分類邏輯（Positive / Negative / Neutral）：
+    - 優先判斷 positive / negative
+    - 若皆無，但出現 neutral 詞，則為 neutral
+    - 否則為 None（無法分類）
+    """
+    pos_count = 0
+    neg_count = 0
+    neu_count = 0
+
+    for token in tokens:
+        word = normalize_token(token.lower())
+        if not is_valid_token(word):
+            continue
+
+        if word in neutral_dict:
+            neu_count += 1
+        elif word in emotion_dict:
+            label = emotion_dict[word]['label']
+            if label == 1:
+                pos_count += 1
+            elif label == -1:
+                neg_count += 1
+
+    if pos_count > neg_count and pos_count > neu_count:
+        return 1  # Positive
+    elif neg_count > pos_count and neg_count > neu_count:
+        return -1  # Negative
+    elif neu_count > 0 and pos_count == 0 and neg_count == 0:
+        return 0  # Neutral
+    else:
+        return None
 
 # === 單字轉 multi-hot 向量 ===
 def build_emotion_feature(word: str, emotion_dict: dict, emotion2idx: dict) -> np.ndarray:
