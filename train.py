@@ -8,17 +8,13 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 import seaborn as sns
-import os
 import pickle
 import numpy as np
+import os
 
-# 全域紀錄（可視覺化訓練曲線）
-train_loss_list = []
-train_acc_list = []
-train_precision_list = []
-train_recall_list = []
-train_f1_list = []
-
+# Global stats for visualization
+train_loss_list, train_acc_list = [], []
+train_precision_list, train_recall_list, train_f1_list = [], [], []
 
 def train_one_epoch(model, train_loader, class_weights_tensor, optimizer, device, epoch):
     model.train()
@@ -31,7 +27,7 @@ def train_one_epoch(model, train_loader, class_weights_tensor, optimizer, device
         x = batch['input_ids'].to(device)
         y_class = batch['label'].to(device)
         emotion_tensor = batch['emotion_feat'].to(device)
-        sources = batch['source']
+        sources = batch.get('source', ['annotated'] * x.size(0))  # Default fallback
 
         optimizer.zero_grad()
         logits = model(x, emotion_tensor)
@@ -40,9 +36,10 @@ def train_one_epoch(model, train_loader, class_weights_tensor, optimizer, device
 
         class_weight_per_sample = class_weights_tensor[y_class].clone()
         per_sample_loss = -(y_onehot * log_probs).sum(dim=1)
-        per_sample_loss = per_sample_loss * class_weight_per_sample
+        per_sample_loss *= class_weight_per_sample
 
-        sample_weights = torch.tensor([1.0 if s == 'annotated' else 0.3 for s in sources], device=x.device)
+        sample_weights = torch.tensor(
+            [1.0 if s == 'annotated' else 0.3 for s in sources], device=x.device)
         loss = (per_sample_loss * sample_weights).mean()
         loss.backward()
         optimizer.step()
@@ -104,22 +101,26 @@ def evaluate(model, test_loader, label_names, device, show_report=False, show_co
         try:
             cm = confusion_matrix(all_trues, all_preds)
             plt.figure(figsize=(6, 5))
-            sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=label_names, yticklabels=label_names)
+            sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
+                        xticklabels=label_names, yticklabels=label_names)
             plt.xlabel("Predicted")
             plt.ylabel("True")
             plt.title("Confusion Matrix")
             plt.tight_layout()
             plt.show()
         except Exception as e:
-            print(f"Not show Confusion Matrix: {e}")
+            print(f"Unable to plot confusion matrix: {e}")
 
     return f1, report
 
 
-def train_model(model, train_loader, val_loader, test_loader,
-                optimizer, scheduler, device, label_names, tokenizer,
-                num_epochs=50):
-
+def train_model(
+    model, train_loader, val_loader, test_loader,
+    optimizer, scheduler, device, label_names, tokenizer,
+    num_epochs=50,
+    model_path="./best_model.pth",
+    tokenizer_path="./tokenizer.pickle"
+):
     if optimizer is None or scheduler is None:
         raise ValueError("Please provide both optimizer and scheduler externally.")
 
@@ -129,7 +130,8 @@ def train_model(model, train_loader, val_loader, test_loader,
     class_weights_tensor = torch.tensor(weights, dtype=torch.float).to(device)
 
     best_f1 = 0
-    patience, wait, delta = 15, 0, 0.001
+    patience, wait = 15, 0
+    delta = 0.005  # 0.5% 相對改善
     f1_per_class = {label: [] for label in label_names}
 
     for epoch in range(1, num_epochs + 1):
@@ -139,7 +141,7 @@ def train_model(model, train_loader, val_loader, test_loader,
         print(f"\n[Epoch {epoch}] Average Loss: {avg_loss:.4f}\n  → Accuracy : {acc*100:.2f}%\n  → Precision: {precision:.4f}\n  → Recall   : {recall:.4f}\n  → F1 Score : {f1:.4f}")
 
         if len(val_loader) == 0:
-            print("⚠️ Validation loader is empty. Skipping validation and scheduler.")
+            print("Validation loader is empty. Skipping validation and scheduler.")
             continue
 
         print("\n[Validation]")
@@ -154,20 +156,23 @@ def train_model(model, train_loader, val_loader, test_loader,
 
         scheduler.step(val_f1)
 
-        if val_f1 > best_f1 + delta:
+        # 相對改善 early stopping
+        relative_improvement = (val_f1 - best_f1) / (best_f1 + 1e-8)
+        if relative_improvement > delta:
             best_f1, wait = val_f1, 0
-            torch.save(model.state_dict(), "/content/Social_IOT-NLP情緒分析/best_model.pth")
-            with open("tokenizer.pickle", "wb") as f:
+            torch.save(model.state_dict(), model_path)
+            with open(tokenizer_path, "wb") as f:
                 pickle.dump(tokenizer, f)
-            print("Best model and tokenizer saved.")
+            print(f"Best model and tokenizer saved to:\n- {model_path}\n- {tokenizer_path}")
         else:
             wait += 1
+            print(f"No improvement. Wait counter: {wait}/{patience}")
             if wait >= patience:
-                print(f"Early stopping triggered. Training stopped at epoch {epoch}.")
+                print(f"Early stopping triggered at epoch {epoch}.")
                 break
 
     print("\n=== Final Evaluation on Test Set ===")
-    model.load_state_dict(torch.load("/content/Social_IOT-NLP情緒分析/best_model.pth"))
+    model.load_state_dict(torch.load(model_path))
     print("Best model weights loaded.")
     if epoch % 5 == 0:
         evaluate(model, test_loader, label_names, device)
