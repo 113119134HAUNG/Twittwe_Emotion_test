@@ -1,6 +1,7 @@
 # label_utils.py
 
 import re
+import ast
 import torch
 import pandas as pd
 import numpy as np
@@ -16,7 +17,7 @@ from negation_words import negation_words
 from intensifier_words import intensifier_words
 from text_preprocessing import advanced_clean, clean_tokens
 
-# === 載入已處理好的情緒詞典（含可選中性詞補充） ===
+# === 載入已處理好的情緒詞典（含中性詞補充與污染檢查） ===
 def load_emotion_dict(path: str = "NRC_Emotion_Label.csv", neutral_path: Optional[str] = None) -> dict:
     df = pd.read_csv(path)
     df.columns = df.columns.str.strip()
@@ -30,23 +31,25 @@ def load_emotion_dict(path: str = "NRC_Emotion_Label.csv", neutral_path: Optiona
             tags = [t.strip() for t in str(row['emotion']).split(',') if t.strip()]
             emotion_dict[word] = {"label": label, "tags": tags}
         except Exception as e:
-            print(f"⚠️ 跳過詞彙 '{word}'（格式錯誤）: {e}")
+            print(f"跳過詞彙 '{word}'（格式錯誤）: {e}")
 
     if neutral_path:
         try:
             df_neu = pd.read_csv(neutral_path)
             df_neu.columns = df_neu.columns.str.strip()
             df_neu = df_neu.dropna(subset=['word'])
-
             for word in df_neu['word'].astype(str).str.strip().str.lower().unique():
-                if word not in emotion_dict:
+                if word not in emotion_dict or not isinstance(emotion_dict[word], dict):
                     emotion_dict[word] = {"label": 0, "tags": ["neutral"]}
         except Exception as e:
-            print(f"⚠️ 中性詞典載入錯誤: {e}")
+            print(f"中性詞典載入錯誤: {e}")
+
+    polluted = [k for k, v in emotion_dict.items() if not isinstance(v, dict)]
+    if polluted:
+        print(f"❗ 有 {len(polluted)} 筆詞彙被污染為非 dict（例如 int），前 5 筆：{polluted[:5]}")
 
     return emotion_dict
 
-# === 獨立中性詞典載入（可用於分類邏輯） ===
 def load_neutral_dict(path: str = "NRC_Emotion_Label2.csv") -> set:
     df = pd.read_csv(path)
     df.columns = df.columns.str.strip()
@@ -59,27 +62,26 @@ def load_neutral_dict(path: str = "NRC_Emotion_Label2.csv") -> set:
 
     return set(neutral_words)
 
-# === 建立 emotion → index 對照表 ===
+
 def extract_emotion_index(emotion_dict: dict) -> dict:
     all_tags = set(tag for entry in emotion_dict.values() if isinstance(entry, dict) for tag in entry.get("tags", []))
     return {tag: idx for idx, tag in enumerate(sorted(all_tags))}
 
-# === 正規化縮小語 ===
+
 def normalize_token(word: str) -> str:
     return contractions.get(word.lower().strip(), word.lower().strip())
 
-# === 判斷 token 是否為有效詞彙（只保留英文字母） ===
+
 @lru_cache(maxsize=50000)
 def is_valid_token(token: str) -> bool:
     return token.isalpha()
 
-# === 推論用清洗並過濾句子（保留長度足夠者） ===
+
 def clean_and_filter_tokens(text: str) -> Optional[List[str]]:
     tokens = clean_tokens(text)
     valid_tokens = [t for t in tokens if is_valid_token(t)]
     return valid_tokens if len(valid_tokens) >= 5 else None
 
-# === 主分類函數（詞組與極性強化） ===
 def classify_tokens(tokens: List[str], emotion_dict: dict, return_counts=False) -> Union[int, dict, None]:
     labels = []
     negation_count = 0
@@ -93,7 +95,6 @@ def classify_tokens(tokens: List[str], emotion_dict: dict, return_counts=False) 
             i += 1
             continue
 
-        # 詞組情緒（三元 / 二元）
         if i + 2 < len(tokens):
             tri = ' '.join([tokens[i], tokens[i+1], tokens[i+2]])
             if tri in phrase_emotion_dict:
@@ -118,7 +119,6 @@ def classify_tokens(tokens: List[str], emotion_dict: dict, return_counts=False) 
                 i += 2
                 continue
 
-        # 否定與強化詞
         if word in negation_words:
             negation_count += 1
             i += 1
@@ -129,13 +129,13 @@ def classify_tokens(tokens: List[str], emotion_dict: dict, return_counts=False) 
             i += 1
             continue
 
-        # 一般詞彙情緒查表
         if word in emotion_dict and isinstance(emotion_dict[word], dict):
-            label = emotion_dict[word].get('label', 0)
-            if negation_count % 2 == 1:
-                label = -label
-            label = int(np.clip(round(label * intensify_weight), -1, 1))
-            labels.append(label)
+            label = emotion_dict[word].get("label", 0)
+            if isinstance(label, int):
+                if negation_count % 2 == 1:
+                    label = -label
+                label = int(np.clip(round(label * intensify_weight), -1, 1))
+                labels.append(label)
             negation_count = 0
             intensify_weight = 1.0
 
@@ -147,7 +147,6 @@ def classify_tokens(tokens: List[str], emotion_dict: dict, return_counts=False) 
     counts = Counter(labels)
     return counts.most_common(1)[0][0] if not return_counts else dict(counts)
 
-# === 三分類推論：正 / 負 / 中性 ===
 def classify_with_two_dicts(tokens: List[str], emotion_dict: dict, neutral_dict: set) -> Optional[int]:
     pos, neg, neu = 0, 0, 0
     for token in tokens:
@@ -172,7 +171,6 @@ def classify_with_two_dicts(tokens: List[str], emotion_dict: dict, neutral_dict:
     else:
         return None
 
-# === 單詞轉多情緒 multi-hot 向量 ===
 def build_emotion_feature(word: str, emotion_dict: dict, emotion2idx: dict) -> np.ndarray:
     word = word.lower()
     tags = []
@@ -194,12 +192,11 @@ def build_emotion_feature(word: str, emotion_dict: dict, emotion2idx: dict) -> n
 
     return vec
 
-# === 整個 token 序列向量化表示 ===
 def build_sequence_emotion_features(tokens: List[str], emotion_dict: dict, emotion2idx: dict) -> torch.Tensor:
     vectors = [build_emotion_feature(t, emotion_dict, emotion2idx) for t in tokens]
     return torch.tensor(vectors, dtype=torch.float)
 
-# === 一次取得情緒分類與向量 ===
+
 def classify_with_feature(tokens: List[str], emotion_dict: dict, emotion2idx: dict):
     polarity = classify_tokens(tokens, emotion_dict)
     emotion_tensor = build_sequence_emotion_features(tokens, emotion_dict, emotion2idx)
