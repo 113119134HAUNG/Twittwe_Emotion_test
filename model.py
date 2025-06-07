@@ -43,7 +43,7 @@ class SentimentClassifier(nn.Module):
     def __init__(self, vocab_size=10000, embedding_dim=128, hidden_dim=128,
                  num_heads=4, num_classes=3, emotion_dim=None):
         super().__init__()
-        assert emotion_dim is not None,
+        assert emotion_dim is not None
         self.emotion_dim = emotion_dim
         self.embedding_dim = embedding_dim
         self.input_dim = embedding_dim + emotion_dim
