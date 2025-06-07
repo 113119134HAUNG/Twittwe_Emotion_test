@@ -8,7 +8,6 @@ from collections import Counter
 from typing import List, Optional, Union
 from functools import lru_cache
 from nltk.tokenize import wordpunct_tokenize
-# from nltk.corpus import wordnet  ← 已不再使用
 
 # 外部資源
 from filler_words import filler_words, single_word_fillers, phrase_fillers, phrase_emotion_dict
@@ -17,20 +16,37 @@ from negation_words import negation_words
 from intensifier_words import intensifier_words
 from text_preprocessing import advanced_clean, clean_tokens
 
-# === 載入已處理好的情緒詞典（正負） ===
-def load_emotion_dict(path: str = "NRC_Emotion_Label.csv") -> dict:
+# === 載入已處理好的情緒詞典（含可選中性詞補充） ===
+def load_emotion_dict(path: str = "NRC_Emotion_Label.csv", neutral_path: Optional[str] = None) -> dict:
     df = pd.read_csv(path)
     df.columns = df.columns.str.strip()
     df = df.dropna(subset=['word', 'emotion', 'association'])
     emotion_dict = {}
+
     for _, row in df.iterrows():
         word = str(row['word']).strip().lower()
-        label = int(row['association'])
-        tags = [t.strip() for t in str(row['emotion']).split(',') if t.strip()]
-        emotion_dict[word] = {"label": label, "tags": tags}
+        try:
+            label = int(row['association'])
+            tags = [t.strip() for t in str(row['emotion']).split(',') if t.strip()]
+            emotion_dict[word] = {"label": label, "tags": tags}
+        except Exception as e:
+            print(f"⚠️ 跳過詞彙 '{word}'（格式錯誤）: {e}")
+
+    if neutral_path:
+        try:
+            df_neu = pd.read_csv(neutral_path)
+            df_neu.columns = df_neu.columns.str.strip()
+            df_neu = df_neu.dropna(subset=['word'])
+
+            for word in df_neu['word'].astype(str).str.strip().str.lower().unique():
+                if word not in emotion_dict:
+                    emotion_dict[word] = {"label": 0, "tags": ["neutral"]}
+        except Exception as e:
+            print(f"⚠️ 中性詞典載入錯誤: {e}")
+
     return emotion_dict
 
-# === 載入中性詞典 ===
+# === 獨立中性詞典載入（可用於分類邏輯） ===
 def load_neutral_dict(path: str = "NRC_Emotion_Label2.csv") -> set:
     df = pd.read_csv(path)
     df.columns = df.columns.str.strip()
@@ -45,25 +61,25 @@ def load_neutral_dict(path: str = "NRC_Emotion_Label2.csv") -> set:
 
 # === 建立 emotion → index 對照表 ===
 def extract_emotion_index(emotion_dict: dict) -> dict:
-    all_tags = set(tag for entry in emotion_dict.values() for tag in entry["tags"])
+    all_tags = set(tag for entry in emotion_dict.values() if isinstance(entry, dict) for tag in entry.get("tags", []))
     return {tag: idx for idx, tag in enumerate(sorted(all_tags))}
 
 # === 正規化縮小語 ===
 def normalize_token(word: str) -> str:
     return contractions.get(word.lower().strip(), word.lower().strip())
 
-# === 判斷 token 是否為有效詞彙（移除 WordNet 限制） ===
+# === 判斷 token 是否為有效詞彙（只保留英文字母） ===
 @lru_cache(maxsize=50000)
 def is_valid_token(token: str) -> bool:
     return token.isalpha()
 
-# === 清洗並過濾句子（回傳 None 表示該句被丟棄）===
+# === 推論用清洗並過濾句子（保留長度足夠者） ===
 def clean_and_filter_tokens(text: str) -> Optional[List[str]]:
     tokens = clean_tokens(text)
     valid_tokens = [t for t in tokens if is_valid_token(t)]
     return valid_tokens if len(valid_tokens) >= 5 else None
 
-# === 主分類函數（處理詞組極性） ===
+# === 主分類函數（詞組與極性強化） ===
 def classify_tokens(tokens: List[str], emotion_dict: dict, return_counts=False) -> Union[int, dict, None]:
     labels = []
     negation_count = 0
@@ -73,18 +89,15 @@ def classify_tokens(tokens: List[str], emotion_dict: dict, return_counts=False) 
     while i < len(tokens):
         word = normalize_token(tokens[i])
 
-        if not is_valid_token(word):
+        if not is_valid_token(word) or word in single_word_fillers:
             i += 1
             continue
 
-        if word in single_word_fillers:
-            i += 1
-            continue
-
+        # 詞組情緒（三元 / 二元）
         if i + 2 < len(tokens):
-            tri_phrase = ' '.join([tokens[i], tokens[i+1], tokens[i+2]])
-            if tri_phrase in phrase_emotion_dict:
-                label = phrase_emotion_dict[tri_phrase]['label']
+            tri = ' '.join([tokens[i], tokens[i+1], tokens[i+2]])
+            if tri in phrase_emotion_dict:
+                label = phrase_emotion_dict[tri].get('label', 0)
                 if negation_count % 2 == 1:
                     label = -label
                 labels.append(label)
@@ -94,9 +107,9 @@ def classify_tokens(tokens: List[str], emotion_dict: dict, return_counts=False) 
                 continue
 
         if i + 1 < len(tokens):
-            bi_phrase = ' '.join([tokens[i], tokens[i+1]])
-            if bi_phrase in phrase_emotion_dict:
-                label = phrase_emotion_dict[bi_phrase]['label']
+            bi = ' '.join([tokens[i], tokens[i+1]])
+            if bi in phrase_emotion_dict:
+                label = phrase_emotion_dict[bi].get('label', 0)
                 if negation_count % 2 == 1:
                     label = -label
                 labels.append(label)
@@ -105,6 +118,7 @@ def classify_tokens(tokens: List[str], emotion_dict: dict, return_counts=False) 
                 i += 2
                 continue
 
+        # 否定與強化詞
         if word in negation_words:
             negation_count += 1
             i += 1
@@ -115,8 +129,9 @@ def classify_tokens(tokens: List[str], emotion_dict: dict, return_counts=False) 
             i += 1
             continue
 
-        if word in emotion_dict:
-            label = emotion_dict[word]['label']
+        # 一般詞彙情緒查表
+        if word in emotion_dict and isinstance(emotion_dict[word], dict):
+            label = emotion_dict[word].get('label', 0)
             if negation_count % 2 == 1:
                 label = -label
             label = int(np.clip(round(label * intensify_weight), -1, 1))
@@ -132,41 +147,37 @@ def classify_tokens(tokens: List[str], emotion_dict: dict, return_counts=False) 
     counts = Counter(labels)
     return counts.most_common(1)[0][0] if not return_counts else dict(counts)
 
-# === 三分類邏輯：正 / 負 / 中性 ===
+# === 三分類推論：正 / 負 / 中性 ===
 def classify_with_two_dicts(tokens: List[str], emotion_dict: dict, neutral_dict: set) -> Optional[int]:
-    pos_count = 0
-    neg_count = 0
-    neu_count = 0
-
+    pos, neg, neu = 0, 0, 0
     for token in tokens:
         word = normalize_token(token.lower())
         if not is_valid_token(word):
             continue
-
         if word in neutral_dict:
-            neu_count += 1
-        elif word in emotion_dict:
-            label = emotion_dict[word]['label']
+            neu += 1
+        elif word in emotion_dict and isinstance(emotion_dict[word], dict):
+            label = emotion_dict[word].get('label', 0)
             if label == 1:
-                pos_count += 1
+                pos += 1
             elif label == -1:
-                neg_count += 1
+                neg += 1
 
-    if pos_count > neg_count and pos_count > neu_count:
+    if pos > max(neg, neu):
         return 1
-    elif neg_count > pos_count and neg_count > neu_count:
+    elif neg > max(pos, neu):
         return -1
-    elif neu_count > 0 and pos_count == 0 and neg_count == 0:
+    elif neu > 0 and pos == 0 and neg == 0:
         return 0
     else:
         return None
 
-# === 單字轉 multi-hot 向量 ===
+# === 單詞轉多情緒 multi-hot 向量 ===
 def build_emotion_feature(word: str, emotion_dict: dict, emotion2idx: dict) -> np.ndarray:
-    tags = []
     word = word.lower()
+    tags = []
 
-    if word in emotion_dict:
+    if word in emotion_dict and isinstance(emotion_dict[word], dict):
         tags += emotion_dict[word].get("tags", [])
 
     if word in phrase_emotion_dict:
@@ -183,12 +194,12 @@ def build_emotion_feature(word: str, emotion_dict: dict, emotion2idx: dict) -> n
 
     return vec
 
-# === 整個 token 序列的向量化表示 ===
+# === 整個 token 序列向量化表示 ===
 def build_sequence_emotion_features(tokens: List[str], emotion_dict: dict, emotion2idx: dict) -> torch.Tensor:
     vectors = [build_emotion_feature(t, emotion_dict, emotion2idx) for t in tokens]
     return torch.tensor(vectors, dtype=torch.float)
 
-# === 輔助函數：同時取得極性與向量表示 ===
+# === 一次取得情緒分類與向量 ===
 def classify_with_feature(tokens: List[str], emotion_dict: dict, emotion2idx: dict):
     polarity = classify_tokens(tokens, emotion_dict)
     emotion_tensor = build_sequence_emotion_features(tokens, emotion_dict, emotion2idx)
